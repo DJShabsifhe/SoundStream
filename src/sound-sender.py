@@ -46,6 +46,19 @@ def send(data):
             print("recvfrom timeout")
             pass
 
+def apply_low_pass_filter(data):
+    filtered_data = bytearray(len(data))
+    alpha = 0.1  # Smoothing factor, adjust as needed
+    prev_sample = 0
+
+    for i in range(0, len(data), 2):
+        sample = int.from_bytes(data[i:i+2], byteorder='little', signed=True)
+        filtered_sample = int(alpha * sample + (1 - alpha) * prev_sample)
+        filtered_data[i:i+2] = filtered_sample.to_bytes(2, byteorder='little', signed=True)
+        prev_sample = filtered_sample
+
+    return filtered_data
+
 def send_audio():
 
     print("开始推送音频...")
@@ -53,7 +66,8 @@ def send_audio():
     try:
         while True:
             audio_data = stream.read(CHUNK, exception_on_overflow=False)
-            send(audio_data)
+            filtered_audio_data = apply_low_pass_filter(audio_data)  # Apply the low-pass filter
+            send(filtered_audio_data)
 
     except KeyboardInterrupt:
         print("停止推送音频...")

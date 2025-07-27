@@ -525,7 +525,7 @@ def draw_screen(stdscr, header_win, log_win):
     """Update the screen with current information"""
     # Update header
     header_win.clear()
-    header_win.addstr(0, 0, "Audio Stream Client", curses.A_BOLD)
+    header_win.addstr(0, 0, "Audio Sender Client", curses.A_BOLD)
     header_win.addstr(1, 0, "-" * (curses.COLS - 1))
     header_win.addstr(2, 0, "Configured devices:")
     

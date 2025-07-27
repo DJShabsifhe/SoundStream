@@ -4,7 +4,7 @@ import socket
 import datetime
 import pyaudio
 import threading
-from queue import Queue
+from queue import Queue, Full
 import time
 import curses
 from collections import deque
@@ -25,6 +25,7 @@ CHANNELS = 1
 RATE = 8000  # Match ESP32's SAMPLE_RATE
 CHUNK = 256  # Half of the ESP32's dma_buf_len
 VOLUME_FACTOR = 2.0  # Volume amplification factor (adjustable)
+AUDIO_SOURCE = 'blackhole'  # 'blackhole' or 'microphone'
 
 # Global variables for device management
 device_queues = {}
@@ -72,20 +73,73 @@ def device_sender_thread(device):
             
     sock.close()
 
-# Initialize PyAudio to capture system audio output
+# Initialize PyAudio to capture system audio
 audio = pyaudio.PyAudio()
 
-# Find the system audio output device
-device_index = None
-for i in range(audio.get_device_count()):
-    device_info = audio.get_device_info_by_index(i)
-    device_name = device_info['name']
-    print(f"Device {i}: {device_name}")
-    # Find Soundflower or BlackHole virtual audio devices on MacOS
-    # Functions as a WIFI speaker
-    if 'Soundflower' in device_name or 'BlackHole' in device_name:
-        device_index = i
-        break
+def list_audio_devices():
+    """List all available audio input devices and their indices"""
+    devices = []
+    for i in range(audio.get_device_count()):
+        device_info = audio.get_device_info_by_index(i)
+        if device_info['maxInputChannels'] > 0:  # Only list input devices
+            devices.append({
+                'index': i,
+                'name': device_info['name'],
+                'is_virtual': 'Soundflower' in device_info['name'] or 'BlackHole' in device_info['name']
+            })
+    return devices
+
+def select_audio_device():
+    """Let user select the audio input device"""
+    devices = list_audio_devices()
+
+    print(r"""    ___             ___          _____                __         
+   /   | __  ______/ (_____     / ___/___  ____  ____/ ___  _____
+  / /| |/ / / / __  / / __ \    \__ \/ _ \/ __ \/ __  / _ \/ ___/
+ / ___ / /_/ / /_/ / / /_/ /   ___/ /  __/ / / / /_/ /  __/ /    
+/_/  |_\__,_/\__,_/_/\____/   /____/\___/_/ /_/\__,_/\___/_/     
+   _________            __                                       
+  / ____/ (____  ____  / /_                                      
+ / /   / / / _ \/ __ \/ __/                                      
+/ /___/ / /  __/ / / / /_                                        
+\____/_/_/\___/_/ /_/\__/                                        
+                                                                 
+""")
+    
+    print("\nAvailable audio input devices:")
+    print("-" * 50)
+    for i, device in enumerate(devices):
+        device_type = "Virtual Device" if device['is_virtual'] else "Physical Device"
+        print(f"{i+1}. {device['name']} ({device_type})")
+    print("-" * 50)
+    
+    while True:
+        try:
+            choice = input("Select device number (or press Enter for default based on AUDIO_SOURCE): ")
+            if not choice:  # User pressed Enter
+                # Find default device based on AUDIO_SOURCE
+                if AUDIO_SOURCE == 'blackhole':
+                    for device in devices:
+                        if device['is_virtual']:
+                            return device['index']
+                    print("No virtual audio device found. Please install BlackHole or Soundflower.")
+                    sys.exit(1)
+                else:  # microphone
+                    # Find first non-virtual device
+                    for device in devices:
+                        if not device['is_virtual']:
+                            return device['index']
+                    return None  # Use system default if no suitable device found
+            
+            choice = int(choice)
+            if 1 <= choice <= len(devices):
+                return devices[choice-1]['index']
+            print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+# Select audio device
+device_index = select_audio_device()
 
 stream = audio.open(
     format=FORMAT,
@@ -109,10 +163,38 @@ def send(data):
             try:
                 # Non-blocking put with timeout
                 device_queues[device['name']].put(chunk, timeout=0.1)
-            except queue.Full:
+            except Full:
                 log_message(f"Queue full for {device['name']}, dropping chunk")
                 
         current_len += CHUNK
+
+def toggle_input_source(stdscr):
+    """Toggle between BlackHole and Microphone input"""
+    global AUDIO_SOURCE
+    height, width = stdscr.getmaxyx()
+    
+    # Create window
+    select_win = curses.newwin(7, width - 4, height - 9, 2)
+    select_win.box()
+    select_win.addstr(1, 2, "Select Audio Input Source:")
+    select_win.addstr(2, 2, "1. BlackHole/Soundflower (System Audio)")
+    select_win.addstr(3, 2, "2. Microphone")
+    select_win.addstr(5, 2, "Current: " + ("BlackHole" if AUDIO_SOURCE == 'blackhole' else "Microphone"))
+    select_win.refresh()
+    
+    try:
+        while True:
+            ch = select_win.getch()
+            if ch == ord('1'):
+                AUDIO_SOURCE = 'blackhole'
+                break
+            elif ch == ord('2'):
+                AUDIO_SOURCE = 'microphone'
+                break
+            elif ch == 27:  # ESC
+                break
+    except curses.error:
+        pass
 
 def configure_devices(stdscr):
     """Device configuration UI"""
@@ -126,7 +208,7 @@ def configure_devices(stdscr):
         height, width = stdscr.getmaxyx()
         
         # Draw title
-        stdscr.addstr(0, 0, "Audio Stream Client - Device Configuration", curses.A_BOLD)
+        stdscr.addstr(0, 0, "Audio Sender Client - Device Configuration", curses.A_BOLD)
         stdscr.addstr(1, 0, "-" * (width - 1))
         
         # Show current devices
@@ -141,8 +223,9 @@ def configure_devices(stdscr):
         stdscr.addstr(menu_start + 2, 2, "a - Add new device")
         stdscr.addstr(menu_start + 3, 2, "e - Edit device")
         stdscr.addstr(menu_start + 4, 2, "d - Delete device")
-        stdscr.addstr(menu_start + 5, 2, "s - Start streaming")
-        stdscr.addstr(menu_start + 6, 2, "q - Quit")
+        stdscr.addstr(menu_start + 5, 2, "i - Input source (BlackHole/Microphone)")
+        stdscr.addstr(menu_start + 6, 2, "s - Start streaming")
+        stdscr.addstr(menu_start + 7, 2, "q - Quit")
         
         stdscr.refresh()
         
@@ -159,6 +242,8 @@ def configure_devices(stdscr):
                 edit_device(stdscr)
             elif key == ord('d'):
                 delete_device(stdscr)
+            elif key == ord('i'):
+                toggle_input_source(stdscr)
         except curses.error:
             pass
 

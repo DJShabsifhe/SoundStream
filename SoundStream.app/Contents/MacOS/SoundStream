@@ -1,0 +1,68 @@
+#!/bin/bash
+
+# SoundStream Application Launcher
+# This script opens Terminal and runs the install_and_run.sh script
+
+# Get the directory where this app is located
+APP_DIR="$(dirname "$(dirname "$(dirname "$0")")")"
+SCRIPT_DIR="$(dirname "$APP_DIR")"
+
+# Check if we can find the install_and_run.sh script
+INSTALL_SCRIPT=""
+
+# First, try to find it in the app's Resources directory
+if [ -f "$(dirname "$(dirname "$0")")/Resources/install_and_run.sh" ]; then
+    INSTALL_SCRIPT="$(dirname "$(dirname "$0")")/Resources/install_and_run.sh"
+    SCRIPT_DIR="$(dirname "$(dirname "$(dirname "$0")")")"
+# Then try in the same directory as the app
+elif [ -f "$SCRIPT_DIR/install_and_run.sh" ]; then
+    INSTALL_SCRIPT="$SCRIPT_DIR/install_and_run.sh"
+else
+    osascript -e 'display dialog "找不到 install_and_run.sh 脚本！\n请确保脚本文件存在。" buttons {"确定"} default button "确定" with icon stop'
+    exit 1
+fi
+
+# Create a temporary script that will run in Terminal
+TEMP_SCRIPT="/tmp/run_soundstream_$$.sh"
+
+cat > "$TEMP_SCRIPT" << EOF
+#!/bin/bash
+
+# Change to the project directory 
+cd "$SCRIPT_DIR"
+
+# Copy necessary files from app bundle to current directory if they don't exist
+APP_RESOURCES="$(dirname "$(dirname "$0")")/Resources"
+
+# Copy install script if it doesn't exist in current directory
+if [ ! -f "./install_and_run.sh" ] && [ -f "\$APP_RESOURCES/install_and_run.sh" ]; then
+    cp "\$APP_RESOURCES/install_and_run.sh" ./
+    chmod +x ./install_and_run.sh
+fi
+
+# Copy other necessary files if they don't exist
+for file in sound_sender.py requirements.txt README.md; do
+    if [ ! -f "./\$file" ] && [ -f "\$APP_RESOURCES/\$file" ]; then
+        cp "\$APP_RESOURCES/\$file" ./
+    fi
+done
+
+# Run the install and run script
+if [ -f "./install_and_run.sh" ]; then
+    bash ./install_and_run.sh
+else
+    echo "错误: 无法找到 install_and_run.sh 脚本"
+    echo "按任意键退出..."
+    read -n 1 -s
+fi
+EOF
+
+chmod +x "$TEMP_SCRIPT"
+
+# Open Terminal and run the script
+osascript << EOF
+tell application "Terminal"
+    activate
+    do script "bash '$TEMP_SCRIPT'; rm '$TEMP_SCRIPT'"
+end tell
+EOF

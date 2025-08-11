@@ -1,0 +1,4 @@
+numpy>=1.24
+pyaudio>=0.2.13
+pyinstaller>=6.0
+

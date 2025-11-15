@@ -5,7 +5,7 @@
     "rate": 8000,
     "chunk": 256,
     "volume_factor": 2.0,
-    "audio_source": "blackhole",
+    "audio_source": "microphone",
     "exception_on_overflow": false
   },
   "network": {
@@ -30,4 +30,3 @@
     "enable_colors": true
   }
 }
-

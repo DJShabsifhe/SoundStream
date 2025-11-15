@@ -7,6 +7,12 @@ const char* password = "somepassword";
 #define ACK_ENABLED true
 #define ACK_TIMEOUT_MS 100
 
+// Device Discovery Configuration
+#define DISCOVERY_PORT 6667          // Port for device discovery protocol
+#define DEVICE_NAME "Vest"           // Device name for discovery
+#define DISCOVERY_BROADCAST_INTERVAL 5000  // Broadcast interval in milliseconds
+#define DISCOVERY_ENABLED true       // Enable device discovery
+
 // Audio Configuration
 #define SAMPLE_RATE 8000          // Sample rate in Hz (8000, 16000, 22050, 44100, 48000)
 #define SAMPLE_BITS 16            // Bits per sample (16 or 32)

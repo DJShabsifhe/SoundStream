@@ -6,7 +6,13 @@ import pyaudio
 import threading
 from queue import Queue, Full
 import time
-import curses
+
+try:
+    import curses
+except ImportError:
+    # Windows compatibility: use windows-curses if curses is not available
+    import windows_curses as curses
+
 from collections import deque
 import numpy as np
 import sys
@@ -122,6 +128,10 @@ device_queues = {}
 device_sockets = {}
 device_threads = {}
 stop_threads = False
+
+# Device Discovery Configuration
+DISCOVERY_PORT = 6667
+DISCOVERY_TIMEOUT = 3.0  # Timeout in seconds for discovery scan
 
 def log_message(msg):
     """Add a message to the log with timestamp"""
@@ -348,10 +358,10 @@ def configure_devices(stdscr):
         stdscr.addstr(menu_start, 0, "-" * (width - 1))
         stdscr.addstr(menu_start + 1, 0, "Menu:", curses.A_BOLD)
         stdscr.addstr(menu_start + 2, 2, "a - Add new device")
-        stdscr.addstr(menu_start + 3, 2, "e - Edit device")
-        stdscr.addstr(menu_start + 4, 2, "d - Delete device")
-        stdscr.addstr(menu_start + 5, 2, "i - Input source (BlackHole/Microphone)")
-        stdscr.addstr(menu_start + 6, 2, "s - Start streaming")
+        stdscr.addstr(menu_start + 3, 2, "s - Scan for devices (auto-discovery)")
+        stdscr.addstr(menu_start + 4, 2, "e - Edit device")
+        stdscr.addstr(menu_start + 5, 2, "d - Delete device")
+        stdscr.addstr(menu_start + 6, 2, "S - Start streaming")
         stdscr.addstr(menu_start + 7, 2, "q - Quit")
         
         stdscr.refresh()
@@ -361,16 +371,16 @@ def configure_devices(stdscr):
             key = stdscr.getch()
             if key == ord('q'):
                 return False  # Don't start streaming
-            elif key == ord('s') and len(DEVICES) > 0:
+            elif key == ord('S') and len(DEVICES) > 0:
                 return True   # Start streaming
             elif key == ord('a'):
                 add_device(stdscr)
+            elif key == ord('s'):
+                scan_devices(stdscr)
             elif key == ord('e'):
                 edit_device(stdscr)
             elif key == ord('d'):
                 delete_device(stdscr)
-            elif key == ord('i'):
-                toggle_input_source(stdscr)
         except curses.error:
             pass
 
@@ -655,6 +665,319 @@ def delete_device(stdscr):
             config['devices'] = DEVICES
             save_config(config)
     except (ValueError, curses.error):
+        pass
+    
+    curses.noecho()
+    curses.curs_set(0)
+
+def discover_devices(update_animation_callback=None):
+    """Discover devices on the network using UDP broadcast
+    
+    Args:
+        update_animation_callback: Optional callback function(count, devices) to update animation during scan
+                                   Called with (count, devices_list) when devices are discovered
+    """
+    discovered_devices = []
+    
+    try:
+        # Create UDP socket for discovery
+        discovery_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        discovery_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        # Use shorter timeout for animation updates
+        discovery_sock.settimeout(0.5)  # 500ms timeout for responsive animation
+        
+        # Bind to any available port
+        discovery_sock.bind(('', 0))
+        
+        # Get local IP address to broadcast on the same subnet
+        try:
+            # Connect to a remote address to determine local interface
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            
+            # Extract subnet and create broadcast address
+            ip_parts = local_ip.split('.')
+            broadcast_ip = '.'.join(ip_parts[:3]) + '.255'
+        except Exception:
+            # Fallback to 255.255.255.255
+            broadcast_ip = '255.255.255.255'
+        
+        # Send discovery request
+        discovery_request = "SOUNDSTREAM_DISCOVERY_REQUEST"
+        discovery_sock.sendto(discovery_request.encode(), (broadcast_ip, DISCOVERY_PORT))
+        
+        # Listen for responses
+        start_time = time.time()
+        seen_devices = set()  # Track by IP:PORT to avoid duplicates
+        last_animation_update = time.time()
+        
+        while time.time() - start_time < DISCOVERY_TIMEOUT:
+            try:
+                data, addr = discovery_sock.recvfrom(256)
+                message = data.decode('utf-8', errors='ignore')
+                
+                # Parse discovery response: "SOUNDSTREAM_DISCOVERY|DEVICE_NAME|IP|PORT"
+                if message.startswith("SOUNDSTREAM_DISCOVERY|"):
+                    parts = message.split('|')
+                    if len(parts) >= 4:
+                        device_name = parts[1]
+                        device_ip = parts[2]
+                        device_port = int(parts[3])
+                        
+                        # Check if we've already seen this device
+                        device_key = f"{device_ip}:{device_port}"
+                        if device_key not in seen_devices:
+                            seen_devices.add(device_key)
+                            discovered_devices.append({
+                                'name': device_name,
+                                'ip': device_ip,
+                                'port': device_port
+                            })
+                            # Update animation with discovered devices
+                            if update_animation_callback:
+                                try:
+                                    update_animation_callback(len(discovered_devices), discovered_devices.copy())
+                                except:
+                                    # Fallback to count-only callback
+                                    update_animation_callback(len(discovered_devices))
+            except socket.timeout:
+                # Update animation during timeout (waiting period)
+                current_time = time.time()
+                if update_animation_callback and (current_time - last_animation_update) >= 0.3:
+                    try:
+                        update_animation_callback(len(discovered_devices), discovered_devices.copy())
+                    except:
+                        update_animation_callback(len(discovered_devices))
+                    last_animation_update = current_time
+                # Check if we've exceeded total timeout
+                if time.time() - start_time >= DISCOVERY_TIMEOUT:
+                    break
+                continue
+            except Exception as e:
+                # Continue listening on error
+                continue
+        
+        discovery_sock.close()
+        
+        # Also listen for periodic broadcasts
+        discovery_listen_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        discovery_listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        discovery_listen_sock.settimeout(0.5)  # 500ms timeout for responsive animation
+        discovery_listen_sock.bind(('', DISCOVERY_PORT))
+        
+        start_time = time.time()
+        last_animation_update = time.time()
+        while time.time() - start_time < DISCOVERY_TIMEOUT:
+            try:
+                data, addr = discovery_listen_sock.recvfrom(256)
+                message = data.decode('utf-8', errors='ignore')
+                
+                # Parse discovery broadcast: "SOUNDSTREAM_DISCOVERY|DEVICE_NAME|IP|PORT"
+                if message.startswith("SOUNDSTREAM_DISCOVERY|"):
+                    parts = message.split('|')
+                    if len(parts) >= 4:
+                        device_name = parts[1]
+                        device_ip = parts[2]
+                        device_port = int(parts[3])
+                        
+                        # Check if we've already seen this device
+                        device_key = f"{device_ip}:{device_port}"
+                        if device_key not in seen_devices:
+                            seen_devices.add(device_key)
+                            discovered_devices.append({
+                                'name': device_name,
+                                'ip': device_ip,
+                                'port': device_port
+                            })
+                            # Update animation with discovered devices
+                            if update_animation_callback:
+                                try:
+                                    update_animation_callback(len(discovered_devices), discovered_devices.copy())
+                                except:
+                                    update_animation_callback(len(discovered_devices))
+            except socket.timeout:
+                # Update animation during timeout (waiting period)
+                current_time = time.time()
+                if update_animation_callback and (current_time - last_animation_update) >= 0.3:
+                    try:
+                        update_animation_callback(len(discovered_devices), discovered_devices.copy())
+                    except:
+                        update_animation_callback(len(discovered_devices))
+                    last_animation_update = current_time
+                # Check if we've exceeded total timeout
+                if time.time() - start_time >= DISCOVERY_TIMEOUT:
+                    break
+                continue
+            except Exception as e:
+                # Continue listening on error
+                continue
+        
+        discovery_listen_sock.close()
+        
+    except Exception as e:
+        log_message(f"Error during device discovery: {e}")
+    
+    return discovered_devices
+
+def scan_devices(stdscr):
+    """Scan for devices on the network"""
+    height, width = stdscr.getmaxyx()
+    
+    # Create window for scanning
+    max_devices = min(15, height - 10)  # Reserve space for header/footer
+    scan_win = curses.newwin(max_devices + 6, width - 4, height - max_devices - 8, 2)
+    scan_win.box()
+    
+    # Animation state
+    animation_frame = 0
+    discovered_devices_list = []
+    scan_complete = False
+    
+    def update_animation(count=0, devices=None):
+        """Update the scanning animation"""
+        nonlocal animation_frame, discovered_devices_list
+        
+        if devices is not None:
+            discovered_devices_list = devices
+        
+        # Clear the window content (keep box)
+        for y in range(1, max_devices + 5):
+            scan_win.addstr(y, 1, " " * (width - 6))
+        
+        # Animate dots: "", ".", "..", "..."
+        dot_count = (animation_frame // 3) % 4
+        dots = "." * dot_count
+        animation_frame += 1
+        
+        # Show scanning message with animated dots
+        scan_win.addstr(1, 2, "Scanning for devices" + dots, curses.A_BOLD)
+        
+        # Show discovered devices count if any
+        device_count = count if count > 0 else len(discovered_devices_list)
+        if device_count > 0:
+            scan_win.addstr(2, 2, f"Found {device_count} device(s)...")
+        else:
+            # Show "Waiting" with animated dots in device list area
+            waiting_dots = "." * dot_count
+            scan_win.addstr(3, 2, "Waiting" + waiting_dots)
+        
+        # Show discovered devices as they are found
+        if len(discovered_devices_list) > 0:
+            scan_win.addstr(3, 2, "Discovered Devices:", curses.A_BOLD)
+            scan_win.addstr(4, 2, "-" * (width - 6))
+            
+            for i, device in enumerate(discovered_devices_list[:max_devices]):
+                device_str = f"{i+1}. {device['name']} - {device['ip']}:{device['port']}"
+                scan_win.addstr(5 + i, 2, device_str[:width - 6])
+        
+        scan_win.refresh()
+    
+    # Start scanning with initial animation
+    update_animation()
+    
+    # Start discovery in a thread so we can update animation
+    import threading
+    discovery_complete = threading.Event()
+    discovered = []
+    
+    def discover_thread():
+        nonlocal discovered
+        
+        def callback(count, devices=None):
+            """Callback to update device list when devices are discovered"""
+            nonlocal discovered_devices_list
+            # Update the discovered devices list (this is thread-safe as we're just updating a list reference)
+            if devices is not None:
+                discovered_devices_list[:] = devices  # Update in place to avoid re-assignment issues
+            # Note: Animation updates happen in main thread for thread safety
+        
+        discovered = discover_devices(callback)
+        # Ensure final update with all discovered devices
+        discovered_devices_list[:] = discovered
+        discovery_complete.set()
+    
+    discovery_thread_obj = threading.Thread(target=discover_thread, daemon=True)
+    discovery_thread_obj.start()
+    
+    # Update animation while scanning (in main thread for curses thread safety)
+    last_update = time.time()
+    while not discovery_complete.is_set():
+        current_time = time.time()
+        if current_time - last_update >= 0.3:  # Update every 300ms
+            update_animation()  # This updates the animation with current discovered_devices_list
+            last_update = current_time
+        time.sleep(0.1)  # Small sleep to avoid busy waiting
+    
+    # Wait for thread to complete
+    discovery_thread_obj.join(timeout=DISCOVERY_TIMEOUT + 1)
+    discovered = discovered if discovered else []
+    
+    # Update with final discovered devices
+    discovered_devices_list = discovered
+    update_animation(len(discovered), discovered)
+    
+    # Small delay to show final state
+    time.sleep(0.5)
+    
+    # Clear and redraw with final results
+    scan_win.clear()
+    scan_win.box()
+    
+    if not discovered:
+        scan_win.addstr(1, 2, "No devices found on the network.", curses.color_pair(2))
+        scan_win.addstr(2, 2, "Press any key to continue...")
+        scan_win.refresh()
+        scan_win.getch()
+        return
+    
+    # Show discovered devices
+    scan_win.addstr(1, 2, "Discovered Devices:", curses.A_BOLD)
+    scan_win.addstr(2, 2, "-" * (width - 6))
+    
+    device_list = []
+    for i, device in enumerate(discovered):
+        device_str = f"{i+1}. {device['name']} - {device['ip']}:{device['port']}"
+        scan_win.addstr(3 + i, 2, device_str)
+        device_list.append(device)
+        if 3 + i >= height - 4:
+            break
+    
+    scan_win.addstr(len(discovered) + 3, 2, "-" * (width - 6))
+    scan_win.addstr(len(discovered) + 4, 2, "Press device number to add, or ESC to cancel")
+    scan_win.refresh()
+    
+    # Wait for user selection
+    curses.echo()
+    curses.curs_set(1)
+    try:
+        while True:
+            ch = scan_win.getch()
+            if ch == 27:  # ESC
+                break
+            elif ch >= ord('1') and ch <= ord('9'):
+                idx = ch - ord('1')
+                if 0 <= idx < len(discovered):
+                    device = discovered[idx]
+                    # Check if device already exists
+                    exists = False
+                    for existing in DEVICES:
+                        if existing['ip'] == device['ip'] and existing['port'] == device['port']:
+                            exists = True
+                            break
+                    
+                    if not exists:
+                        DEVICES.append(device)
+                        config['devices'] = DEVICES
+                        save_config(config)
+                        scan_win.addstr(len(discovered) + 5, 2, f"Added {device['name']}!", curses.color_pair(1))
+                    else:
+                        scan_win.addstr(len(discovered) + 5, 2, "Device already exists!", curses.color_pair(2))
+                    scan_win.refresh()
+                    time.sleep(1)
+                    break
+    except curses.error:
         pass
     
     curses.noecho()

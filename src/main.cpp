@@ -24,8 +24,11 @@ Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + 
 
 static unsigned int data_received_times = 0;
 WiFiUDP udp;
+WiFiUDP discovery_udp;
 
-void setup_i2s(); 
+void setup_i2s();
+void broadcast_device_info();
+void handle_discovery_request(); 
 
 bool wifi_connected = false;
 
@@ -139,9 +142,17 @@ void setup() {
         ESP.restart();
     }
 
-    // Start UDP
+    // Start UDP for audio data
     udp.begin(PORT);
-    Serial.printf("Listening on UDP port %d\n", PORT);
+    Serial.printf("Listening on UDP port %d for audio data\n", PORT);
+    
+    // Start UDP for device discovery
+    if (DISCOVERY_ENABLED) {
+        discovery_udp.begin(DISCOVERY_PORT);
+        Serial.printf("Device discovery enabled on port %d\n", DISCOVERY_PORT);
+        Serial.printf("Device name: %s\n", DEVICE_NAME);
+        Serial.printf("Device MAC: %s\n", WiFi.macAddress().c_str());
+    }
 }
 
 void setup_i2s() {
@@ -267,6 +278,81 @@ void play_continuous_tone() {
     }
 }
 
+String get_device_name_with_mac() {
+    // Get MAC address and extract last 4 hex characters
+    String mac = WiFi.macAddress();
+    // MAC format: XX:XX:XX:XX:XX:XX, extract last 4 hex chars (last 2 octets)
+    int last_colon = mac.lastIndexOf(':');
+    int second_last_colon = mac.lastIndexOf(':', last_colon - 1);
+    String mac_suffix = mac.substring(second_last_colon + 1);
+    mac_suffix.replace(":", "");
+    
+    // Combine DEVICE_NAME with MAC suffix: "SoundStream-AABB"
+    String full_name = String(DEVICE_NAME);
+    full_name += "-";
+    full_name += mac_suffix;
+    return full_name;
+}
+
+void broadcast_device_info() {
+    if (!DISCOVERY_ENABLED || !wifi_connected) return;
+    
+    // Get unique device name (includes MAC address suffix)
+    String device_name = get_device_name_with_mac();
+    
+    // Create discovery message: "SOUNDSTREAM_DISCOVERY|DEVICE_NAME|IP|PORT"
+    String message = "SOUNDSTREAM_DISCOVERY|";
+    message += device_name;
+    message += "|";
+    message += WiFi.localIP().toString();
+    message += "|";
+    message += String(PORT);
+    
+    // Broadcast to 255.255.255.255
+    IPAddress broadcast = IPAddress(255, 255, 255, 255);
+    discovery_udp.beginPacket(broadcast, DISCOVERY_PORT);
+    discovery_udp.print(message);
+    discovery_udp.endPacket();
+}
+
+void handle_discovery_request() {
+    if (!DISCOVERY_ENABLED) return;
+    
+    int packetSize = discovery_udp.parsePacket();
+    if (packetSize) {
+        char buffer[256];
+        int len = discovery_udp.read(buffer, sizeof(buffer) - 1);
+        if (len > 0) {
+            buffer[len] = '\0';
+            String request = String(buffer);
+            
+            // Check if it's a discovery request: "SOUNDSTREAM_DISCOVERY_REQUEST"
+            if (request.startsWith("SOUNDSTREAM_DISCOVERY_REQUEST")) {
+                // Send response directly to requester
+                IPAddress remoteIP = discovery_udp.remoteIP();
+                int remotePort = discovery_udp.remotePort();
+                
+                // Get unique device name (includes MAC address suffix)
+                String device_name = get_device_name_with_mac();
+                
+                // Create discovery response: "SOUNDSTREAM_DISCOVERY|DEVICE_NAME|IP|PORT"
+                String response = "SOUNDSTREAM_DISCOVERY|";
+                response += device_name;
+                response += "|";
+                response += WiFi.localIP().toString();
+                response += "|";
+                response += String(PORT);
+                
+                discovery_udp.beginPacket(remoteIP, remotePort);
+                discovery_udp.print(response);
+                discovery_udp.endPacket();
+                
+                Serial.printf("Sent discovery response to %s:%d\n", remoteIP.toString().c_str(), remotePort);
+            }
+        }
+    }
+}
+
 void loop() {
     // Check WiFi connection status
     if (!wifi_connected || WiFi.status() != WL_CONNECTED) {
@@ -277,6 +363,21 @@ void loop() {
         delay(WIFI_RECONNECT_DELAY);
         ESP.restart();
         return;
+    }
+
+    // Handle device discovery
+    if (DISCOVERY_ENABLED) {
+        static unsigned long last_broadcast = 0;
+        unsigned long current_time = millis();
+        
+        // Periodic broadcast
+        if (current_time - last_broadcast >= DISCOVERY_BROADCAST_INTERVAL) {
+            broadcast_device_info();
+            last_broadcast = current_time;
+        }
+        
+        // Handle discovery requests
+        handle_discovery_request();
     }
 
     static unsigned long last_play_time = 0;

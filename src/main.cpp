@@ -4,22 +4,8 @@
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
 
-#include "keys.h"
-
-#define PORT 6666
-#define SAMPLE_RATE (8000)  // Lowered from 16000 to 8000 Hz
-#define SAMPLE_BITS (16)
-#define I2S_NUM (i2s_port_t)0
-#define I2S_BCK_IO (GPIO_NUM_4)    // I2S SCK (Bit Clock)
-#define I2S_WS_IO (GPIO_NUM_5)     // I2S WS (Word Select/Left-Right Clock)
-#define I2S_DO_IO (GPIO_NUM_9)     // I2S DATA (Serial Data)
-#define I2S_SD_MODE (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX)
-#define BUFFER_SIZE (512)   // Match Python sender's CHUNK size
-#define NUM_BUFFERS (16)    // Reduced number of buffers for lower latency
-#define BUFFER_THRESHOLD (2)  // Start playing earlier
-
-#define PIN         48
-#define NUM_PIXELS  1
+// Which you should have in your /include folder
+#include "receiver_config.h"
 
 // Circular buffer structure
 struct AudioBuffer {
@@ -34,9 +20,7 @@ volatile int writeIndex = 0;
 volatile int readIndex = 0;
 volatile int buffersAvailable = 0;
 
-#define TONE_FREQUENCY 440 // Frequency of the continuous tone in Hz
-
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_PIXELS, PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 static unsigned int data_received_times = 0;
 WiFiUDP udp;
@@ -46,10 +30,11 @@ void setup_i2s();
 bool wifi_connected = false;
 
 void setup() {
-    Serial.begin(9600);
+    Serial.begin(SERIAL_BAUD);
     
     strip.begin();
-    strip.setPixelColor(0, strip.Color(50, 0, 0));
+    strip.setPixelColor(0, strip.Color(LED_COLOR_INITIAL_R, LED_COLOR_INITIAL_G, LED_COLOR_INITIAL_B));
+    strip.setBrightness(LED_BRIGHTNESS);
     strip.show();
 
     // First, scan for networks
@@ -67,7 +52,7 @@ void setup() {
                 Serial.printf("Target network '%s' found! Signal strength: %d dBm\n", ssid, WiFi.RSSI(i));
                 break;
             }
-            delay(10);
+            delay(WIFI_SCAN_DELAY);
         }
     }
 
@@ -76,7 +61,7 @@ void setup() {
         Serial.println("Available networks:");
         for (int i = 0; i < n; ++i) {
             Serial.printf("%d: %s (%d dBm)\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i));
-            delay(10);
+            delay(WIFI_SCAN_DELAY);
         }
         Serial.println("Restarting in 10 seconds...");
         delay(10000);
@@ -92,7 +77,7 @@ void setup() {
     
     // Wait for connection with timeout
     int timeout_counter = 0;
-    while (WiFi.status() != WL_CONNECTED && timeout_counter < 20) { // 10 second timeout
+    while (WiFi.status() != WL_CONNECTED && timeout_counter < WIFI_CONNECT_TIMEOUT) {
         delay(500);
         Serial.print(".");
         timeout_counter++;
@@ -140,17 +125,17 @@ void setup() {
             audioBuffers[i].filled = false;
         }
         
-        strip.setPixelColor(0, strip.Color(0, 255, 0)); // Green = connected
+        strip.setPixelColor(0, strip.Color(LED_COLOR_CONNECTED_R, LED_COLOR_CONNECTED_G, LED_COLOR_CONNECTED_B)); // Green = connected
         strip.show();
         wifi_connected = true;
     } else {
         Serial.println("Failed to connect to WiFi! Please check your credentials or WiFi availability.");
         Serial.printf("Last WiFi Status: %d\n", WiFi.status());
-        strip.setPixelColor(0, strip.Color(255, 0, 0)); // Red = connection failed
+        strip.setPixelColor(0, strip.Color(LED_COLOR_NOT_CONNECTED_R, LED_COLOR_NOT_CONNECTED_G, LED_COLOR_NOT_CONNECTED_B)); // Red = connection failed
         strip.show();
         // Restart the ESP32 after connection failure
         Serial.println("Restarting ESP32...");
-        delay(1000);
+        delay(WIFI_RECONNECT_DELAY);
         ESP.restart();
     }
 
@@ -163,14 +148,14 @@ void setup_i2s() {
     i2s_config_t i2s_config = {
         .mode = I2S_SD_MODE,
         .sample_rate = SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .bits_per_sample = (SAMPLE_BITS == 16) ? I2S_BITS_PER_SAMPLE_16BIT : I2S_BITS_PER_SAMPLE_32BIT,
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 4,        // Reduce for lower latency
-        .dma_buf_len = 512,        // Change to smaller DMA buffer for faster processing
-        .use_apll = false,
-        .tx_desc_auto_clear = true, // Auto clear DMA descriptor
+        .dma_buf_count = I2S_DMA_BUF_COUNT,
+        .dma_buf_len = I2S_DMA_BUF_LEN,
+        .use_apll = I2S_USE_APLL,
+        .tx_desc_auto_clear = I2S_TX_DESC_AUTO_CLEAR,
         .fixed_mclk = 0
     }; 
 
@@ -200,17 +185,23 @@ bool add_to_buffer(char* buffer, int len) {
     }
 
     // Validate sample values
-    int16_t* samples = (int16_t*)buffer;
-    int num_samples = len / 2;
-    bool valid_audio = false;
-    
-    for (int i = 0; i < num_samples && !valid_audio; i++) {
-        if (samples[i] != 0) valid_audio = true;
-    }
-    
-    if (!valid_audio) {
-        Serial.println("Warning: Received silent or invalid audio data");
-        return false;
+    if (VALIDATE_AUDIO_DATA) {
+        int16_t* samples = (int16_t*)buffer;
+        int num_samples = len / 2;
+        bool valid_audio = false;
+        
+        for (int i = 0; i < num_samples && !valid_audio; i++) {
+            int16_t sample = samples[i];
+            // Check if sample is non-zero (above noise threshold)
+            if (sample > MIN_AUDIO_AMPLITUDE || sample < -MIN_AUDIO_AMPLITUDE) {
+                valid_audio = true;
+            }
+        }
+        
+        if (!valid_audio) {
+            Serial.println("Warning: Received silent or invalid audio data");
+            return false;
+        }
     }
 
     // Copy data to the next write buffer
@@ -230,7 +221,7 @@ void sound_play() {
     if (buffersAvailable == 0 || !audioBuffers[readIndex].filled) {
         if (is_playing) {
             // Was playing but now stopped - show green
-            strip.setPixelColor(0, strip.Color(0, 255, 0));
+            strip.setPixelColor(0, strip.Color(LED_COLOR_CONNECTED_R, LED_COLOR_CONNECTED_G, LED_COLOR_CONNECTED_B));
             strip.show();
             is_playing = false;
         }
@@ -239,7 +230,7 @@ void sound_play() {
 
     // Start playing - show blue
     if (!is_playing) {
-        strip.setPixelColor(0, strip.Color(0, 0, 255));
+        strip.setPixelColor(0, strip.Color(LED_COLOR_PLAYING_R, LED_COLOR_PLAYING_G, LED_COLOR_PLAYING_B));
         strip.show();
         is_playing = true;
     }
@@ -280,10 +271,10 @@ void loop() {
     // Check WiFi connection status
     if (!wifi_connected || WiFi.status() != WL_CONNECTED) {
         wifi_connected = false;
-        strip.setPixelColor(0, strip.Color(255, 0, 0)); // Red = not connected
+        strip.setPixelColor(0, strip.Color(LED_COLOR_NOT_CONNECTED_R, LED_COLOR_NOT_CONNECTED_G, LED_COLOR_NOT_CONNECTED_B)); // Red = not connected
         strip.show();
         Serial.println("WiFi disconnected! Restarting...");
-        delay(1000);
+        delay(WIFI_RECONNECT_DELAY);
         ESP.restart();
         return;
     }
@@ -299,12 +290,14 @@ void loop() {
             if (add_to_buffer(buffer, len)) {
                 data_received_times++;
                 // Ack
-                udp.beginPacket(udp.remoteIP(), udp.remotePort());
-                udp.write((const uint8_t *)"OK", 2);
-                udp.endPacket();
+                if (ACK_ENABLED) {
+                    udp.beginPacket(udp.remoteIP(), udp.remotePort());
+                    udp.write((const uint8_t *)"OK", 2);
+                    udp.endPacket();
+                }
             } else {
                 Serial.println("Buffer full, dropping packet");
-                strip.setPixelColor(0, strip.Color(255, 165, 0)); // Orange = buffer full
+                strip.setPixelColor(0, strip.Color(LED_COLOR_BUFFER_FULL_R, LED_COLOR_BUFFER_FULL_G, LED_COLOR_BUFFER_FULL_B)); // Orange = buffer full
                 strip.show();
             }
         }
@@ -312,44 +305,51 @@ void loop() {
 
     // Handle playback timing
     unsigned long current_time = millis();
-    unsigned long target_interval = (1000 * BUFFER_SIZE) / (SAMPLE_RATE * 4);
+    unsigned long target_interval = (1000 * BUFFER_SIZE) / (SAMPLE_RATE * PLAYBACK_INTERVAL_MULTIPLIER);
     
     if (current_time - last_play_time >= target_interval) {
         last_play_time = current_time;
         
-        // Adaptive playback based on buffer fullness
-        if (buffersAvailable > NUM_BUFFERS * 2/3) {
-            // Buffer is getting full, play multiple chunks
-            for (int i = 0; i < 3; i++) {
-                sound_play();
+        if (ADAPTIVE_PLAYBACK_ENABLED) {
+            // Adaptive playback based on buffer fullness
+            if (buffersAvailable > NUM_BUFFERS * BUFFER_FULL_THRESHOLD_PERCENT / 100) {
+                // Buffer is getting full, play multiple chunks
+                for (int i = 0; i < 3; i++) {
+                    sound_play();
+                }
+                // Reduce interval temporarily
+                target_interval = (1000 * BUFFER_SIZE) / (SAMPLE_RATE * 6);
             }
-            // Reduce interval temporarily
-            target_interval = (1000 * BUFFER_SIZE) / (SAMPLE_RATE * 6);
-        }
-        else if (buffersAvailable > NUM_BUFFERS/2) {
-            // Buffer is moderately full, play two chunks
-            for (int i = 0; i < 2; i++) {
-                sound_play();
+            else if (buffersAvailable > NUM_BUFFERS * BUFFER_MODERATE_THRESHOLD_PERCENT / 100) {
+                // Buffer is moderately full, play two chunks
+                for (int i = 0; i < 2; i++) {
+                    sound_play();
+                }
+                // Slightly reduced interval
+                target_interval = (1000 * BUFFER_SIZE) / (SAMPLE_RATE * 5);
             }
-            // Slightly reduced interval
-            target_interval = (1000 * BUFFER_SIZE) / (SAMPLE_RATE * 5);
-        }
-        else if (buffersAvailable >= BUFFER_THRESHOLD || data_received_times > 0) {
-            sound_play();
-            // Normal interval
-            target_interval = (1000 * BUFFER_SIZE) / (SAMPLE_RATE * 4);
+            else if (buffersAvailable >= BUFFER_THRESHOLD || data_received_times > 0) {
+                sound_play();
+                // Normal interval
+                target_interval = (1000 * BUFFER_SIZE) / (SAMPLE_RATE * PLAYBACK_INTERVAL_MULTIPLIER);
+            } else {
+                // Output silence if no data
+                char silent_buffer[BUFFER_SIZE] = {0};
+                add_to_buffer(silent_buffer, BUFFER_SIZE);
+                sound_play();
+                Serial.println("Outputting silent sound");
+            }
         } else {
-            // Output silence if no data
-            char silent_buffer[BUFFER_SIZE] = {0};
-            add_to_buffer(silent_buffer, BUFFER_SIZE);
-            sound_play();
-            Serial.println("Outputting silent sound");
+            // Simple playback mode
+            if (buffersAvailable >= BUFFER_THRESHOLD || data_received_times > 0) {
+                sound_play();
+            }
         }
     }
 
     // Reset counter periodically
     static unsigned long last_check = 0;
-    if (current_time - last_check > 500) {
+    if (current_time - last_check > BUFFER_CHECK_INTERVAL_MS) {
         last_check = current_time;
         data_received_times = 0;
     }

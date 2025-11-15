@@ -1,0 +1,33 @@
+{
+  "audio": {
+    "format": "paInt16",
+    "channels": 1,
+    "rate": 8000,
+    "chunk": 256,
+    "volume_factor": 2.0,
+    "audio_source": "blackhole",
+    "exception_on_overflow": false
+  },
+  "network": {
+    "socket_timeout": 0.01,
+    "ack_timeout": 0.01,
+    "queue_maxsize": 4
+  },
+  "devices": [
+    {
+      "name": "Device1",
+      "ip": "192.168.31.203",
+      "port": 6666
+    }
+  ],
+  "logging": {
+    "max_messages": 1000,
+    "log_to_file": false,
+    "log_file_path": "soundstream.log"
+  },
+  "ui": {
+    "refresh_rate": 30,
+    "enable_colors": true
+  }
+}
+

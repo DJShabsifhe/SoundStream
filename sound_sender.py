@@ -10,22 +10,112 @@ import curses
 from collections import deque
 import numpy as np
 import sys
+import json
+import os
+
+# Configuration file path
+CONFIG_FILE = 'sender_config.json'
 
 # Initialize logging
 log_messages = deque(maxlen=1000)  # Store last 1000 messages
 log_lock = threading.Lock()
 
-DEVICES = [
-    {'name': 'Device1', 'ip': '192.168.31.203', 'port': 6666}
-]
+# Default configuration
+DEFAULT_CONFIG = {
+    "audio": {
+        "format": "paInt16",
+        "channels": 1,
+        "rate": 8000,
+        "chunk": 256,
+        "volume_factor": 2.0,
+        "audio_source": "blackhole",
+        "exception_on_overflow": False
+    },
+    "network": {
+        "socket_timeout": 0.01,
+        "ack_timeout": 0.01,
+        "queue_maxsize": 4
+    },
+    "devices": [
+        {
+            "name": "Device1",
+            "ip": "192.168.31.203",
+            "port": 6666
+        }
+    ],
+    "logging": {
+        "max_messages": 1000,
+        "log_to_file": False,
+        "log_file_path": "soundstream.log"
+    },
+    "ui": {
+        "refresh_rate": 30,
+        "enable_colors": True
+    }
+}
 
-# Parameters to match ESP32 I2S settings
-FORMAT = pyaudio.paInt16  # 16bit PCM to match ESP32's I2S_BITS_PER_SAMPLE_16BIT
-CHANNELS = 1
-RATE = 8000  # Match ESP32's SAMPLE_RATE
-CHUNK = 256  # Half of the ESP32's dma_buf_len
-VOLUME_FACTOR = 2.0  # Volume amplification factor (adjustable)
-AUDIO_SOURCE = 'blackhole'  # 'blackhole' or 'microphone'
+def load_config():
+    """Load configuration from JSON file"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+                # Deep merge with default config to ensure all keys exist
+                merged_config = DEFAULT_CONFIG.copy()
+                # Deep merge nested dictionaries
+                for key in config:
+                    if isinstance(config[key], dict) and key in merged_config and isinstance(merged_config[key], dict):
+                        # Merge nested dictionary
+                        merged_config[key] = {**merged_config[key], **config[key]}
+                    else:
+                        # Overwrite non-dict values or new keys
+                        merged_config[key] = config[key]
+                return merged_config
+        except Exception as e:
+            print(f"Error loading config file: {e}")
+            print("Using default configuration")
+            return DEFAULT_CONFIG
+    else:
+        # Create default config file
+        save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG
+
+def save_config(config):
+    """Save configuration to JSON file"""
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving config file: {e}")
+        return False
+
+# Load configuration
+config = load_config()
+
+# Extract configuration values
+DEVICES = config['devices']
+FORMAT = getattr(pyaudio, config['audio']['format'], pyaudio.paInt16)
+CHANNELS = config['audio']['channels']
+RATE = config['audio']['rate']
+CHUNK = config['audio']['chunk']
+VOLUME_FACTOR = config['audio']['volume_factor']
+AUDIO_SOURCE = config['audio']['audio_source']
+EXCEPTION_ON_OVERFLOW = config['audio']['exception_on_overflow']
+
+SOCKET_TIMEOUT = config['network']['socket_timeout']
+ACK_TIMEOUT = config['network']['ack_timeout']
+QUEUE_MAXSIZE = config['network']['queue_maxsize']
+
+LOG_MAX_MESSAGES = config['logging']['max_messages']
+LOG_TO_FILE = config['logging']['log_to_file']
+LOG_FILE_PATH = config['logging']['log_file_path']
+
+UI_REFRESH_RATE = config['ui']['refresh_rate']
+UI_ENABLE_COLORS = config['ui']['enable_colors']
+
+# Update log messages deque with configured max size
+log_messages = deque(maxlen=LOG_MAX_MESSAGES)
 
 # Global variables for device management
 device_queues = {}
@@ -36,13 +126,22 @@ stop_threads = False
 def log_message(msg):
     """Add a message to the log with timestamp"""
     timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    log_entry = f"{timestamp} - {msg}"
     with log_lock:
-        log_messages.append(f"{timestamp} - {msg}")
+        log_messages.append(log_entry)
+    
+    # Optionally log to file
+    if LOG_TO_FILE:
+        try:
+            with open(LOG_FILE_PATH, 'a') as f:
+                f.write(log_entry + '\n')
+        except Exception:
+            pass  # Silently fail if file logging fails
 
 def device_sender_thread(device):
     """Thread function to handle sending data to a specific device"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(0.01)  # Reduced timeout for faster error detection
+    sock.settimeout(SOCKET_TIMEOUT)
     device_sockets[device['name']] = sock
     
     while not stop_threads:
@@ -58,12 +157,16 @@ def device_sender_thread(device):
                     continue
                     
                 # Try to receive acknowledgment
-                try:
-                    receive_data, pair_addr = sock.recvfrom(64)
-                    if pair_addr[0] == device['ip']:
-                        log_message(f"Received ACK from {device['name']}")
-                except socket.timeout:
-                    log_message(f"No response from {device['name']}")
+                if ACK_TIMEOUT > 0:
+                    try:
+                        sock.settimeout(ACK_TIMEOUT)
+                        receive_data, pair_addr = sock.recvfrom(64)
+                        sock.settimeout(SOCKET_TIMEOUT)  # Reset to original timeout
+                        if pair_addr[0] == device['ip']:
+                            log_message(f"Received ACK from {device['name']}")
+                    except socket.timeout:
+                        log_message(f"No response from {device['name']}")
+                        sock.settimeout(SOCKET_TIMEOUT)  # Reset to original timeout
                     
             except Exception as e:
                 log_message(f"Error sending to {device['name']}: {e}")
@@ -190,7 +293,7 @@ def send(data):
 
 def toggle_input_source(stdscr):
     """Toggle between BlackHole and Microphone input"""
-    global AUDIO_SOURCE
+    global AUDIO_SOURCE, config
     height, width = stdscr.getmaxyx()
     
     # Create window
@@ -207,9 +310,13 @@ def toggle_input_source(stdscr):
             ch = select_win.getch()
             if ch == ord('1'):
                 AUDIO_SOURCE = 'blackhole'
+                config['audio']['audio_source'] = 'blackhole'
+                save_config(config)
                 break
             elif ch == ord('2'):
                 AUDIO_SOURCE = 'microphone'
+                config['audio']['audio_source'] = 'microphone'
+                save_config(config)
                 break
             elif ch == 27:  # ESC
                 break
@@ -269,6 +376,7 @@ def configure_devices(stdscr):
 
 def add_device(stdscr):
     """Add a new device UI"""
+    global DEVICES, config
     curses.noecho()  # Disable automatic echo
     curses.curs_set(1)
     height, width = stdscr.getmaxyx()
@@ -365,6 +473,9 @@ def add_device(stdscr):
             try:
                 port = int(port)
                 DEVICES.append({'name': name, 'ip': ip, 'port': port})
+                # Save configuration
+                config['devices'] = DEVICES
+                save_config(config)
             except ValueError:
                 form_win.addstr(6, 2, "Invalid port number!", curses.color_pair(2))
                 form_win.refresh()
@@ -377,6 +488,7 @@ def add_device(stdscr):
 
 def edit_device(stdscr):
     """Edit existing device UI"""
+    global DEVICES, config
     if not DEVICES:
         return
         
@@ -503,6 +615,9 @@ def edit_device(stdscr):
             if new_port:
                 try:
                     device['port'] = int(new_port)
+                    # Save configuration
+                    config['devices'] = DEVICES
+                    save_config(config)
                 except ValueError:
                     form_win.addstr(7, 2, "Invalid port number!", curses.color_pair(2))
                     form_win.refresh()
@@ -515,6 +630,7 @@ def edit_device(stdscr):
 
 def delete_device(stdscr):
     """Delete device UI"""
+    global DEVICES, config
     if not DEVICES:
         return
         
@@ -535,6 +651,9 @@ def delete_device(stdscr):
         
         if 0 <= idx < len(DEVICES):
             del DEVICES[idx]
+            # Save configuration
+            config['devices'] = DEVICES
+            save_config(config)
     except (ValueError, curses.error):
         pass
     
@@ -597,7 +716,7 @@ def send_audio(stdscr):
     device_threads.clear()
     
     for device in DEVICES:
-        device_queues[device['name']] = Queue(maxsize=4)  # Further reduced buffer size
+        device_queues[device['name']] = Queue(maxsize=QUEUE_MAXSIZE)
         thread = threading.Thread(target=device_sender_thread, args=(device,))
         thread.daemon = True
         device_threads[device['name']] = thread
@@ -619,7 +738,7 @@ def send_audio(stdscr):
     
     try:
         while True:
-            audio_data = stream.read(CHUNK, exception_on_overflow=False)
+            audio_data = stream.read(CHUNK, exception_on_overflow=EXCEPTION_ON_OVERFLOW)
             # Convert bytes to numpy array
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
             # Apply volume adjustment

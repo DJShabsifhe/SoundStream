@@ -51,8 +51,8 @@ For the GUI build on macOS you also need:
 
 1. Install the Arduino IDE along with the ESP32 board support package.
 2. Connect your ESP32 to your computer and load the firmware sketch.
-3. In the firmware code, replace the placeholders for `ssid` and `password` with your Wi-Fi credentials.
-4. Upload the firmware to the ESP32.
+3. In the firmware, replace the placeholders in receiver_config_example.h for `ssid` and `password` with your Wi-Fi credentials. Create a receiver_config.h with real values.
+4. Compile, and upload the firmware to the ESP32.
 5. Open the Serial Monitor to check the connection status. Once the ESP32 connects to Wi-Fi, it will listen for UDP packets on the specified port.
 
 #### 2. Python Script (CLI) or GUI
@@ -70,13 +70,13 @@ For the GUI build on macOS you also need:
    ```bash
    python3 sound_sender.py
 
-4. GUI: Launch the desktop app:
+4. GUI: Launch the desktop app (TODO):
 
    ```bash
    python3 sound_gui.py
    ```
 
-5. GUI Packaging for macOS (App bundle):
+5. GUI Packaging for macOS (TODO):
 
    ```bash
    chmod +x build_mac.sh
@@ -141,10 +141,12 @@ For the GUI build on macOS you also need:
 
 ## Future Improvements
 
-- Add real-time audio playback on the ESP32 using I2S.
+- Build the UI!
+- Device discovery protocol...
 - Implement error correction or retransmission for lost packets.
+- Add UDP reliability layer.
 - Extend the firmware to control an LED strip synchronized with the audio data.
-- Add support for multiple audio channels (stereo).
+- Add support for multiple audio channels, better sample rates/ codec. Maybe adaptive.
 
 ---
 

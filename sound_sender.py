@@ -6,17 +6,11 @@ import pyaudio
 import threading
 from queue import Queue, Full
 import time
-
-try:
-    import curses
-except ImportError:
-    # Windows compatibility: use windows-curses if curses is not available
-    import windows_curses as curses
-
 from collections import deque
 import numpy as np
 import sys
 import json
+import curses
 import os
 
 # Configuration file path

@@ -1,5 +1,6 @@
-numpy>=1.24
-pyaudio>=0.2.13
-pyinstaller>=6.0
-windows-curses>=2.3.0; sys_platform == "win32"
-
+flask
+flask-socketio
+flask-cors
+pyaudio
+numpy
+noisereduce

@@ -5,3 +5,4 @@
 .vscode/ipch
 include/keys.h
 include/receiver_config.h
+static/background.png

@@ -13,13 +13,7 @@
     "ack_timeout": 0.01,
     "queue_maxsize": 4
   },
-  "devices": [
-    {
-      "name": "Vest-AAB0",
-      "ip": "192.168.31.179",
-      "port": 6666
-    }
-  ],
+  "devices": [],
   "logging": {
     "max_messages": 1000,
     "log_to_file": false,

@@ -265,17 +265,9 @@ def select_audio_device():
         except ValueError:
             print("Please enter a valid number.")
 
-# Select audio device
-device_index = select_audio_device()
-
-stream = audio.open(
-    format=FORMAT,
-    channels=CHANNELS,
-    rate=RATE,
-    input=True,
-    input_device_index=device_index,
-    frames_per_buffer=CHUNK
-)
+# Audio stream will be initialized in send_audio()
+stream = None
+device_index = None
 
 def send(data):
     total_len = len(data)
@@ -664,6 +656,63 @@ def delete_device(stdscr):
     curses.noecho()
     curses.curs_set(0)
 
+
+def get_dhcp_leases():
+    """Read DHCP leases from dnsmasq.leases file if it exists"""
+    leases = []
+    # Common locations for dnsmasq leases
+    lease_files = [
+        '/var/lib/misc/dnsmasq.leases',
+        '/var/lib/dnsmasq/dnsmasq.leases',
+        '/tmp/dhcp.leases'
+    ]
+    
+    for lease_file in lease_files:
+        if os.path.exists(lease_file):
+            try:
+                with open(lease_file, 'r') as f:
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            # dnsmasq.leases format: timestamp mac ip hostname client_id
+                            ip = parts[2]
+                            name = parts[3]
+                            if name == '*':
+                                name = f"Device_{ip}"
+                            leases.append({
+                                'name': name,
+                                'ip': ip,
+                                'port': 6666  # Default port
+                            })
+            except Exception as e:
+                log_message(f"Error reading DHCP leases from {lease_file}: {e}")
+    return leases
+
+def get_arp_table():
+    """Read ARP table from /proc/net/arp"""
+    arp_entries = []
+    if os.path.exists('/proc/net/arp'):
+        try:
+            with open('/proc/net/arp', 'r') as f:
+                # Skip header line
+                next(f)
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        # /proc/net/arp format: IP HW_type Flags HW_address Mask Device
+                        ip = parts[0]
+                        hw_address = parts[3]
+                        # Skip entries with incomplete HW address (00:00:00:00:00:00)
+                        if hw_address != '00:00:00:00:00:00':
+                            arp_entries.append({
+                                'name': f"ARP_{ip}",
+                                'ip': ip,
+                                'port': 6666  # Default port
+                            })
+        except Exception as e:
+            log_message(f"Error reading ARP table: {e}")
+    return arp_entries
+
 def discover_devices(update_animation_callback=None):
     """Discover devices on the network using UDP broadcast
     
@@ -809,6 +858,31 @@ def discover_devices(update_animation_callback=None):
                 continue
         
         discovery_listen_sock.close()
+        
+        # If on Linux (e.g. Raspberry Pi), also check DHCP leases and ARP table
+        if sys.platform.startswith('linux'):
+            # First try DHCP leases (Raspberry Pi as router)
+            dhcp_leases = get_dhcp_leases()
+            for device in dhcp_leases:
+                device_key = f"{device['ip']}:{device['port']}"
+                if device_key not in seen_devices:
+                    seen_devices.add(device_key)
+                    discovered_devices.append(device)
+            
+            # Fallback to ARP table if needed or as additional source
+            arp_devices = get_arp_table()
+            for device in arp_devices:
+                device_key = f"{device['ip']}:{device['port']}"
+                if device_key not in seen_devices:
+                    seen_devices.add(device_key)
+                    discovered_devices.append(device)
+            
+            # Final update to animation if any new devices were found via file system
+            if update_animation_callback:
+                try:
+                    update_animation_callback(len(discovered_devices), discovered_devices.copy())
+                except:
+                    update_animation_callback(len(discovered_devices))
         
     except Exception as e:
         log_message(f"Error during device discovery: {e}")
@@ -1013,7 +1087,22 @@ def draw_screen(stdscr, header_win, log_win):
     log_win.refresh()
 
 def send_audio(stdscr):
-    global device_queues, device_threads, stop_threads
+    global device_queues, device_threads, stop_threads, stream, device_index
+
+    # Select audio device if not already selected
+    if device_index is None:
+        device_index = select_audio_device()
+
+    # Open audio stream if not already open
+    if stream is None:
+        stream = audio.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RATE,
+            input=True,
+            input_device_index=device_index,
+            frames_per_buffer=CHUNK
+        )
 
     # Set up colors
     curses.start_color()
@@ -1092,9 +1181,16 @@ def send_audio(stdscr):
             device_queues[device['name']].put(None)
             
         # Close audio resources
-        stream.stop_stream()
-        stream.close()
-        audio.terminate()
+        if stream:
+            try:
+                stream.stop_stream()
+                stream.close()
+            except:
+                pass
+            stream = None
+            
+        # Only terminate if we're completely done (CLI exit)
+        # audio.terminate() 
         
         # Close all sockets
         for sock in device_sockets.values():
